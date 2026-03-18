@@ -1,3 +1,5 @@
+from .audio_classification_agent import InterruptionAgent, InterruptionDecision
+from .audio_classifier import ASRBackend, AudioClassifier, ClassificationResult
 from .credentials import (
     get_cloudflare_turn_credentials,
     get_cloudflare_turn_credentials_async,
@@ -7,6 +9,7 @@ from .credentials import (
     get_turn_credentials_async,
     get_twilio_turn_credentials,
 )
+from .interruption_detector import InterruptionDetector
 from .pause_detection import (
     ModelOptions,
     PauseDetectionModel,
@@ -51,7 +54,9 @@ from .webrtc import (
 )
 
 __all__ = [
+    "ASRBackend",
     "AsyncStreamHandler",
+    "AudioClassifier",
     "AudioVideoStreamHandler",
     "AudioEmitType",
     "AsyncAudioVideoStreamHandler",
@@ -63,9 +68,13 @@ __all__ = [
     "audio_to_file",
     "audio_to_float32",
     "audio_to_int16",
+    "ClassificationResult",
     "get_hf_turn_credentials",
     "get_twilio_turn_credentials",
     "get_turn_credentials",
+    "InterruptionAgent",
+    "InterruptionDecision",
+    "InterruptionDetector",
     "ReplyOnPause",
     "ReplyOnStopWords",
     "SileroVadOptions",
