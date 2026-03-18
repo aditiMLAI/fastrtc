@@ -1,53 +1,136 @@
+"""Intelligent interruption agent that classifies audio as noise or real speech.
+
+The :class:`InterruptionAgent` wires together Stage 1 (heuristics) and Stage 2
+(ASR) of :class:`~fastrtc.audio_classifier.AudioClassifier` and produces an
+:class:`InterruptionDecision` indicating whether the response pipeline should
+continue or pause.
+"""
+
 import asyncio
+from dataclasses import dataclass
+from typing import Literal
+
 import numpy as np
-from typing import List, Dict
+from numpy.typing import NDArray
 
-class AudioClassificationAgent:
-    def __init__(self):
-        self.context_history = []
+from .audio_classifier import (
+    ASRBackend,
+    AudioClassifier,
+    ClassificationResult,
+    ConversationContext,
+)
 
-    async def process_audio(self, audio_data: List[float]):
-        # Simulate ASR validation
-        is_valid = await self.validate_asr(audio_data)
-        if is_valid:
-            classification = await self.classify_audio(audio_data)
-            self.store_context(classification)
-            return classification
+
+@dataclass
+class InterruptionDecision:
+    """Decision produced by :class:`InterruptionAgent` for a single audio chunk.
+
+    Attributes:
+        action: ``"continue"`` to keep generating, ``"pause"`` to stop and wait.
+        classification: The underlying :class:`ClassificationResult`.
+        transcript: ASR transcript if available, else ``None``.
+        confidence: Confidence score in [0, 1].
+    """
+
+    action: Literal["continue", "pause"]
+    classification: ClassificationResult
+    transcript: str | None
+    confidence: float
+
+
+class InterruptionAgent:
+    """Async agent that determines whether an audio interruption is noise or speech.
+
+    Uses :class:`~fastrtc.audio_classifier.AudioClassifier` internally.  Both
+    the heuristic and ASR stages run without blocking the asyncio event loop.
+
+    The agent supports the async context manager protocol; on ``__aexit__`` it
+    awaits all in-flight ASR tasks before returning.
+
+    Args:
+        asr_backend: Optional :class:`~fastrtc.audio_classifier.ASRBackend`
+            for Stage 2 ASR confirmation.  When ``None``, any chunk that passes
+            heuristics is treated as real speech.
+        classifier: Optional pre-constructed :class:`AudioClassifier`.  When
+            supplied, *asr_backend* is ignored.
+        context: Optional shared :class:`ConversationContext`.
+    """
+
+    def __init__(
+        self,
+        asr_backend: ASRBackend | None = None,
+        *,
+        classifier: AudioClassifier | None = None,
+        context: ConversationContext | None = None,
+    ) -> None:
+        if classifier is not None:
+            self._classifier = classifier
         else:
-            return "Invalid audio data"
+            self._classifier = AudioClassifier(
+                asr_backend=asr_backend,
+                context=context,
+            )
+        self._inflight: set[asyncio.Task[InterruptionDecision]] = set()
 
-    async def validate_asr(self, audio_data: List[float]) -> bool:
-        # Simulate ASR validation logic here
-        await asyncio.sleep(1)  # Simulating processing delay
-        return True  # Assume the audio is always valid for the example
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
 
-    async def classify_audio(self, audio_data: List[float]) -> str:
-        # Simulate audio classification logic
-        await asyncio.sleep(1)  # Simulating processing delay
-        # Simple logic for demo purposes
-        if np.mean(audio_data) > 0.5:
-            return "Speech"
-        else:
-            return "Noise"
+    @property
+    def context(self) -> "ConversationContext":
+        """Return the classifier's conversation context."""
+        return self._classifier.context
 
-    def store_context(self, classification: str):
-        self.context_history.append({
-            "classification": classification,
-            "timestamp": self.get_timestamp()
-        })
+    # ------------------------------------------------------------------
+    # Async context manager
+    # ------------------------------------------------------------------
 
-    @staticmethod
-    def get_timestamp() -> str:
-        from datetime import datetime
-        return datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    async def __aenter__(self) -> "InterruptionAgent":
+        """Enter the async context manager."""
+        return self
 
-# Example usage
-if __name__ == "__main__":
-    agent = AudioClassificationAgent()
-    
-    # Simulate an audio input
-    audio_input = [0.1, 0.2, 0.3, 0.8, 0.6]
-    
-    # Run processing
-    result = asyncio.run(agent.process_audio(audio_input))
-    print(f"Classification Result: {result}")
+    async def __aexit__(self, *_: object) -> None:
+        """Drain all in-flight ASR tasks before exiting."""
+        if self._inflight:
+            await asyncio.gather(*self._inflight, return_exceptions=True)
+        self._inflight.clear()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def handle_interruption(
+        self,
+        audio_chunk: NDArray[np.float32],
+        sample_rate: int,
+        *,
+        bot_speaking: bool = False,
+    ) -> InterruptionDecision:
+        """Classify *audio_chunk* and decide whether to pause response generation.
+
+        Args:
+            audio_chunk: Mono float32 audio samples.
+            sample_rate: Sample rate of *audio_chunk* in Hz.
+            bot_speaking: ``True`` when the bot is currently generating speech;
+                raises the noise threshold to reduce false positives.
+
+        Returns:
+            An :class:`InterruptionDecision` with ``action = "pause"`` for real
+            speech and ``action = "continue"`` for noise.
+        """
+        result, transcript, confidence = await self._classifier.classify(
+            audio_chunk,
+            sample_rate,
+            bot_speaking=bot_speaking,
+        )
+
+        action: Literal["continue", "pause"] = (
+            "pause" if result is ClassificationResult.REAL_SPEECH else "continue"
+        )
+
+        return InterruptionDecision(
+            action=action,
+            classification=result,
+            transcript=transcript,
+            confidence=confidence,
+        )
